@@ -12,24 +12,26 @@
 
 typedef struct {
     int client_socket;
-    int target_socket;
-    int monitor_socket;
+    struct sockaddr_in client_addr;
+    struct sockaddr_in monitor_addr;
+    socklen_t addr_len;
 } client_info;
 
 void *client_handler(void *arg) {
     client_info *info = (client_info *)arg;
     int client_socket = info->client_socket;
-    int target_socket = info->target_socket;
-    int monitor_socket = info->monitor_socket;
+    struct sockaddr_in client_addr = info->client_addr;
+    struct sockaddr_in monitor_addr = info->monitor_addr;
+    socklen_t addr_len = info->addr_len;
     char buffer[BUFFER_SIZE];
 
     while (1) {
-        int read_size = recv(client_socket, buffer, BUFFER_SIZE, 0);
+        int read_size = recvfrom(client_socket, buffer, BUFFER_SIZE, 0, (struct sockaddr *)&client_addr, &addr_len);
         if (read_size > 0) {
             buffer[read_size] = '\0';
-            send(target_socket, buffer, strlen(buffer), 0);
-            if (monitor_socket != -1) {
-                send(monitor_socket, buffer, strlen(buffer), 0);
+            sendto(client_socket, buffer, strlen(buffer), 0, (struct sockaddr *)&client_addr, addr_len);
+            if (monitor_addr.sin_port != 0) {
+                sendto(client_socket, buffer, strlen(buffer), 0, (struct sockaddr *)&monitor_addr, addr_len);
             }
         }
     }
@@ -51,96 +53,48 @@ void parse_arguments(int argc, char *argv[], int *port, int *monitor_port) {
 }
 
 int main(int argc, char *argv[]) {
-    int server_fd, monitor_fd, client_socket1, client_socket2, monitor_socket, addr_len;
-    struct sockaddr_in address;
+    int server_fd, monitor_fd, port, monitor_port;
+    struct sockaddr_in server_addr, monitor_addr, client_addr;
+    socklen_t addr_len;
     pthread_t thread1, thread2;
-    int port, monitor_port;
 
     parse_arguments(argc, argv, &port, &monitor_port);
 
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+    if ((server_fd = socket(AF_INET, SOCK_DGRAM, 0)) == 0) {
         perror("Socket failed");
         exit(EXIT_FAILURE);
     }
 
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(port);
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(port);
 
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+    if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("Bind failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    if (listen(server_fd, 3) < 0) {
-        perror("Listen failed");
         close(server_fd);
         exit(EXIT_FAILURE);
     }
 
     printf("Server is listening on port %d\n", port);
 
-    addr_len = sizeof(address);
-    client_socket1 = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addr_len);
-    if (client_socket1 < 0) {
-        perror("Accept failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
+    memset(&monitor_addr, 0, sizeof(monitor_addr));
+    monitor_addr.sin_family = AF_INET;
+    monitor_addr.sin_port = htons(monitor_port);
 
-    printf("Client 1 connected\n");
+    addr_len = sizeof(client_addr);
+    recvfrom(server_fd, NULL, 0, 0, (struct sockaddr *)&client_addr, &addr_len);
 
-    client_socket2 = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addr_len);
-    if (client_socket2 < 0) {
-        perror("Accept failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    printf("Client 2 connected\n");
-
-    if ((monitor_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Socket failed");
-        exit(EXIT_FAILURE);
-    }
-
-    address.sin_port = htons(monitor_port);
-
-    if (bind(monitor_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("Bind failed");
-        close(monitor_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    if (listen(monitor_fd, 1) < 0) {
-        perror("Listen failed");
-        close(monitor_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    printf("Waiting for monitor client on port %d\n", monitor_port);
-    monitor_socket = accept(monitor_fd, (struct sockaddr *)&address, (socklen_t*)&addr_len);
-    if (monitor_socket < 0) {
-        perror("Accept failed");
-        monitor_socket = -1; // Proceed without a monitor client
-    } else {
-        printf("Monitor client connected\n");
-    }
-
-    client_info info1 = {client_socket1, client_socket2, monitor_socket};
-    client_info info2 = {client_socket2, client_socket1, monitor_socket};
-
+    client_info info1 = {server_fd, client_addr, monitor_addr, addr_len};
     pthread_create(&thread1, NULL, client_handler, (void *)&info1);
+
+    recvfrom(server_fd, NULL, 0, 0, (struct sockaddr *)&client_addr, &addr_len);
+    client_info info2 = {server_fd, client_addr, monitor_addr, addr_len};
     pthread_create(&thread2, NULL, client_handler, (void *)&info2);
 
     pthread_join(thread1, NULL);
     pthread_join(thread2, NULL);
 
     close(server_fd);
-    if (monitor_socket != -1) {
-        close(monitor_socket);
-    }
-    close(monitor_fd);
     return 0;
 }

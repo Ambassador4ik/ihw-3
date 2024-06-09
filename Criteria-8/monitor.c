@@ -28,7 +28,7 @@ int main(int argc, char *argv[]) {
 
     parse_arguments(argc, argv, &server_ip, &monitor_port);
 
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         printf("\n Socket creation error \n");
         return -1;
     }
@@ -41,15 +41,10 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        printf("\nConnection Failed \n");
-        return -1;
-    }
-
     printf("Connected to monitor server at %s:%d\n", server_ip, monitor_port);
 
     while (1) {
-        int read_size = recv(sock, buffer, BUFFER_SIZE, 0);
+        int read_size = recvfrom(sock, buffer, BUFFER_SIZE, 0, NULL, NULL);
         if (read_size > 0) {
             buffer[read_size] = '\0';
             printf("Monitor: %s\n", buffer);

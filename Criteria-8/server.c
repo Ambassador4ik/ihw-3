@@ -11,7 +11,8 @@
 #define BUFFER_SIZE 1024
 
 typedef struct {
-    int client_socket;
+    struct sockaddr_in client_addr;
+    socklen_t client_addr_len;
     int target_socket;
     pthread_mutex_t *monitor_mutex;
     int *monitor_sockets;
@@ -27,7 +28,6 @@ typedef struct {
 
 void *client_handler(void *arg) {
     client_info *info = (client_info *)arg;
-    int client_socket = info->client_socket;
     int target_socket = info->target_socket;
     pthread_mutex_t *monitor_mutex = info->monitor_mutex;
     int *monitor_sockets = info->monitor_sockets;
@@ -35,20 +35,20 @@ void *client_handler(void *arg) {
     char buffer[BUFFER_SIZE];
 
     while (1) {
-        int read_size = recv(client_socket, buffer, BUFFER_SIZE, 0);
+        int read_size = recvfrom(info->target_socket, buffer, BUFFER_SIZE, 0, (struct sockaddr *)&info->client_addr, &info->client_addr_len);
         if (read_size > 0) {
             buffer[read_size] = '\0';
-            send(target_socket, buffer, strlen(buffer), 0);
+            sendto(target_socket, buffer, strlen(buffer), 0, (struct sockaddr *)&info->client_addr, info->client_addr_len);
 
             pthread_mutex_lock(monitor_mutex);
             for (int i = 0; i < *monitor_count; i++) {
-                send(monitor_sockets[i], buffer, strlen(buffer), 0);
+                sendto(monitor_sockets[i], buffer, strlen(buffer), 0, (struct sockaddr *)&info->client_addr, info->client_addr_len);
             }
             pthread_mutex_unlock(monitor_mutex);
         }
     }
 
-    close(client_socket);
+    close(target_socket);
     return NULL;
 }
 
@@ -66,7 +66,7 @@ void *monitor_handler(void *arg) {
 
     // Ожидание завершения работы клиента
     char buffer[BUFFER_SIZE];
-    while (recv(monitor_socket, buffer, BUFFER_SIZE, 0) > 0);
+    while (recvfrom(monitor_socket, buffer, BUFFER_SIZE, 0, NULL, NULL) > 0);
 
     pthread_mutex_lock(monitor_mutex);
     for (int i = 0; i < *monitor_count; i++) {
@@ -97,9 +97,9 @@ void parse_arguments(int argc, char *argv[], int *port, int *monitor_port) {
 }
 
 int main(int argc, char *argv[]) {
-    int server_fd, monitor_fd, client_socket1, client_socket2, addr_len;
-    struct sockaddr_in address;
-    pthread_t thread1, thread2, monitor_thread;
+    int server_fd, monitor_fd, addr_len;
+    struct sockaddr_in address, monitor_address;
+    pthread_t client_thread, monitor_thread;
     int port, monitor_port;
 
     int monitor_sockets[FD_SETSIZE];
@@ -108,7 +108,7 @@ int main(int argc, char *argv[]) {
 
     parse_arguments(argc, argv, &port, &monitor_port);
 
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+    if ((server_fd = socket(AF_INET, SOCK_DGRAM, 0)) == 0) {
         perror("Socket failed");
         exit(EXIT_FAILURE);
     }
@@ -123,72 +123,40 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    if (listen(server_fd, 3) < 0) {
-        perror("Listen failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    printf("Server is listening on port %d\n", port);
-
-    addr_len = sizeof(address);
-    client_socket1 = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addr_len);
-    if (client_socket1 < 0) {
-        perror("Accept failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    printf("Client 1 connected\n");
-
-    client_socket2 = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addr_len);
-    if (client_socket2 < 0) {
-        perror("Accept failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    printf("Client 2 connected\n");
-
-    if ((monitor_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+    if ((monitor_fd = socket(AF_INET, SOCK_DGRAM, 0)) == 0) {
         perror("Socket failed");
         exit(EXIT_FAILURE);
     }
 
-    address.sin_port = htons(monitor_port);
+    monitor_address.sin_family = AF_INET;
+    monitor_address.sin_addr.s_addr = INADDR_ANY;
+    monitor_address.sin_port = htons(monitor_port);
 
-    if (bind(monitor_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+    if (bind(monitor_fd, (struct sockaddr *)&monitor_address, sizeof(monitor_address)) < 0) {
         perror("Bind failed");
         close(monitor_fd);
         exit(EXIT_FAILURE);
     }
 
-    if (listen(monitor_fd, 3) < 0) {
-        perror("Listen failed");
-        close(monitor_fd);
-        exit(EXIT_FAILURE);
-    }
-
+    printf("Server is listening on port %d\n", port);
     printf("Waiting for monitor clients on port %d\n", monitor_port);
 
-    client_info info1 = {client_socket1, client_socket2, &monitor_mutex, monitor_sockets, &monitor_count};
-    client_info info2 = {client_socket2, client_socket1, &monitor_mutex, monitor_sockets, &monitor_count};
-
-    pthread_create(&thread1, NULL, client_handler, (void *)&info1);
-    pthread_create(&thread2, NULL, client_handler, (void *)&info2);
+    addr_len = sizeof(address);
 
     while (1) {
-        int monitor_socket = accept(monitor_fd, (struct sockaddr *)&address, (socklen_t*)&addr_len);
-        if (monitor_socket < 0) {
-            perror("Accept failed");
-            close(monitor_fd);
-            exit(EXIT_FAILURE);
-        }
+        client_info *client_info1 = malloc(sizeof(client_info));
+        client_info1->target_socket = server_fd;
+        client_info1->monitor_mutex = &monitor_mutex;
+        client_info1->monitor_sockets = monitor_sockets;
+        client_info1->monitor_count = &monitor_count;
 
-        printf("Monitor client connected\n");
+        recvfrom(server_fd, NULL, 0, 0, (struct sockaddr *)&client_info1->client_addr, &client_info1->client_addr_len);
+        printf("Client connected\n");
+
+        pthread_create(&client_thread, NULL, client_handler, (void *)client_info1);
 
         monitor_info *info = malloc(sizeof(monitor_info));
-        info->monitor_socket = monitor_socket;
+        info->monitor_socket = monitor_fd;
         info->monitor_mutex = &monitor_mutex;
         info->monitor_sockets = monitor_sockets;
         info->monitor_count = &monitor_count;
@@ -197,8 +165,7 @@ int main(int argc, char *argv[]) {
         pthread_detach(monitor_thread);
     }
 
-    pthread_join(thread1, NULL);
-    pthread_join(thread2, NULL);
+    pthread_join(client_thread, NULL);
 
     close(server_fd);
     close(monitor_fd);

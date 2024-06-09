@@ -23,6 +23,7 @@ typedef struct {
     int w;
     int sum_value;
     Target *targets;
+    struct sockaddr_in server_addr;
 } client_info;
 
 void parse_arguments(int argc, char *argv[], int *K, int *h, int *w, char **server_ip, int *server_port) {
@@ -74,7 +75,7 @@ void print_field(Target *targets, int K, int h, int w, int latest_x, int latest_
         field[targets[i].y][targets[i].x] = targets[i].value;
     }
 
-    printf("\033[H\033[J");  // Очистка экрана
+    printf("\033[H\033[J");  // Clear screen
     printf(">> Battle Simulation <<\n");
     for (int i = 0; i < h; i++) {
         for (int j = 0; j < w; j++) {
@@ -93,38 +94,39 @@ void print_field(Target *targets, int K, int h, int w, int latest_x, int latest_
 void *receive_shots(void *arg) {
     client_info *info = (client_info *)arg;
     char buffer[BUFFER_SIZE];
+    socklen_t addr_len = sizeof(info->server_addr);
 
     while (info->K > 0) {
-        int read_size = recv(info->sock, buffer, BUFFER_SIZE, 0);
+        int read_size = recvfrom(info->sock, buffer, BUFFER_SIZE, 0, (struct sockaddr *)&info->server_addr, &addr_len);
         if (read_size > 0) {
             buffer[read_size] = '\0';
 
-            // Парсинг координат от сервера
+            // Parse coordinates from server
             int x, y;
             sscanf(buffer, "x=%d y=%d", &x, &y);
 
-            // Проверка поражения цели
+            // Check target hit
             int target_hit = 0;
             for (int i = 0; i < info->K; i++) {
                 if (info->targets[i].x == x && info->targets[i].y == y) {
                     target_hit = 1;
                     info->sum_value -= info->targets[i].value;
-                    info->targets[i] = info->targets[info->K - 1]; // Заменяем текущую цель последней
-                    info->K--; // Уменьшаем количество целей
+                    info->targets[i] = info->targets[info->K - 1]; // Replace current target with last one
+                    info->K--; // Decrease target count
                     break;
                 }
             }
 
-            // Обновление состояния
+            // Update state
             int latest_x = x;
             int latest_y = y;
             int latest_hit = target_hit;
 
-            // Отправка данных обратно на сервер
+            // Send data back to server
             sprintf(buffer, "target_hit=%d remaining_targets=%d remaining_sum_value=%d", target_hit, info->K, info->sum_value);
-            send(info->sock, buffer, strlen(buffer), 0);
+            sendto(info->sock, buffer, strlen(buffer), 0, (struct sockaddr *)&info->server_addr, addr_len);
 
-            // Обновление поля
+            // Update field
             print_field(info->targets, info->K, info->h, info->w, latest_x, latest_y, latest_hit, info->K, info->sum_value);
 
             if (info->K == 0) {
@@ -140,17 +142,18 @@ void *receive_shots(void *arg) {
 void *send_shots(void *arg) {
     client_info *info = (client_info *)arg;
     char buffer[BUFFER_SIZE];
+    socklen_t addr_len = sizeof(info->server_addr);
 
     while (info->K > 0) {
-        // Генерация случайного интервала T
+        // Generate random interval T
         int T = (rand() % 5) + 1;
         sleep(T);
 
-        // Генерация случайных координат
+        // Generate random coordinates
         int x = rand() % info->w;
         int y = rand() % info->h;
         sprintf(buffer, "x=%d y=%d", x, y);
-        send(info->sock, buffer, strlen(buffer), 0);
+        sendto(info->sock, buffer, strlen(buffer), 0, (struct sockaddr *)&info->server_addr, addr_len);
     }
 
     return NULL;
@@ -170,7 +173,7 @@ int main(int argc, char *argv[]) {
     struct sockaddr_in serv_addr;
     char buffer[BUFFER_SIZE];
 
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         printf("\n Socket creation error \n");
         return -1;
     }
@@ -183,25 +186,21 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        printf("\nConnection Failed \n");
-        return -1;
-    }
-
-    // Отправка данных о поле и мишенях на сервер
+    // Send field and target data to server
     sprintf(buffer, "height=%d width=%d targets=%d sum_value=%d", h, w, K, sum_value);
-    send(sock, buffer, strlen(buffer), 0);
+    sendto(sock, buffer, strlen(buffer), 0, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
 
-    // Инициализация данных для обновления состояния
-    client_info info = {sock, K, h, w, sum_value, targets};
+    // Initialize data for state update
+    client_info info = {sock, K, h, w, sum_value, targets, serv_addr};
     pthread_t recv_thread, send_thread;
 
     pthread_create(&recv_thread, NULL, receive_shots, (void *)&info);
     pthread_create(&send_thread, NULL, send_shots, (void *)&info);
 
     pthread_join(recv_thread, NULL);
-    pthread_join(send_thread, NULL);
+        pthread_join(send_thread, NULL);
 
-    close(sock);
-    return 0;
-}
+        close(sock);
+        return 0;
+    }
+    

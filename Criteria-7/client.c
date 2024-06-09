@@ -22,6 +22,7 @@ typedef struct {
     int h;
     int w;
     int sum_value;
+    struct sockaddr_in server_addr;
     Target *targets;
 } client_info;
 
@@ -93,9 +94,11 @@ void print_field(Target *targets, int K, int h, int w, int latest_x, int latest_
 void *receive_shots(void *arg) {
     client_info *info = (client_info *)arg;
     char buffer[BUFFER_SIZE];
+    struct sockaddr_in from_addr;
+    socklen_t addr_len = sizeof(from_addr);
 
     while (info->K > 0) {
-        int read_size = recv(info->sock, buffer, BUFFER_SIZE, 0);
+        int read_size = recvfrom(info->sock, buffer, BUFFER_SIZE, 0, (struct sockaddr *)&from_addr, &addr_len);
         if (read_size > 0) {
             buffer[read_size] = '\0';
 
@@ -122,7 +125,7 @@ void *receive_shots(void *arg) {
 
             // Отправка данных обратно на сервер
             sprintf(buffer, "target_hit=%d remaining_targets=%d remaining_sum_value=%d", target_hit, info->K, info->sum_value);
-            send(info->sock, buffer, strlen(buffer), 0);
+            sendto(info->sock, buffer, strlen(buffer), 0, (struct sockaddr *)&info->server_addr, addr_len);
 
             // Обновление поля
             print_field(info->targets, info->K, info->h, info->w, latest_x, latest_y, latest_hit, info->K, info->sum_value);
@@ -140,6 +143,7 @@ void *receive_shots(void *arg) {
 void *send_shots(void *arg) {
     client_info *info = (client_info *)arg;
     char buffer[BUFFER_SIZE];
+    socklen_t addr_len = sizeof(info->server_addr);
 
     while (info->K > 0) {
         // Генерация случайного интервала T
@@ -150,7 +154,7 @@ void *send_shots(void *arg) {
         int x = rand() % info->w;
         int y = rand() % info->h;
         sprintf(buffer, "x=%d y=%d", x, y);
-        send(info->sock, buffer, strlen(buffer), 0);
+        sendto(info->sock, buffer, strlen(buffer), 0, (struct sockaddr *)&info->server_addr, addr_len);
     }
 
     return NULL;
@@ -170,11 +174,12 @@ int main(int argc, char *argv[]) {
     struct sockaddr_in serv_addr;
     char buffer[BUFFER_SIZE];
 
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         printf("\n Socket creation error \n");
         return -1;
     }
 
+    memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(server_port);
 
@@ -183,17 +188,12 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        printf("\nConnection Failed \n");
-        return -1;
-    }
-
     // Отправка данных о поле и мишенях на сервер
     sprintf(buffer, "height=%d width=%d targets=%d sum_value=%d", h, w, K, sum_value);
-    send(sock, buffer, strlen(buffer), 0);
+    sendto(sock, buffer, strlen(buffer), 0, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
 
     // Инициализация данных для обновления состояния
-    client_info info = {sock, K, h, w, sum_value, targets};
+    client_info info = {sock, K, h, w, sum_value, serv_addr, targets};
     pthread_t recv_thread, send_thread;
 
     pthread_create(&recv_thread, NULL, receive_shots, (void *)&info);
